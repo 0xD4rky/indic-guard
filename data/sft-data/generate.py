@@ -235,7 +235,7 @@ def main(stats : bool):
         for label, count in label_counts.items():
             print(f"{label}: {count} examples")
     
-    # sample 
+    # testing a sample
     print("\nSample SFT data:")
     for i, sample in enumerate(augmented_dataset[:3]):
         print(f"\nExample {i+1}:")
