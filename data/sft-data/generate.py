@@ -1,12 +1,12 @@
 import os
 from distilabel.pipeline import Pipeline
-from distilabel.steps import LoadDataFromDicts, TextGeneration, KeepColumns
+from distilabel.steps import LoadDataFromDicts, KeepColumns
+from distilabel.steps.tasks import TextGeneration
 from distilabel.llms import vLLM
 import json
 import random
 
-# my cases:
-catefories = {
+categories = {  
     "RELIGION": ["Hindu", "Muslim", "Sikh", "Christian", "Buddhist", "Jain", "Parsi"],
     "REGIONS": ["North India", "South India", "East India", "West India", "Northeast India"],
     "LANGUAGES": ["Hindi", "Tamil", "Telugu", "Bengali", "Marathi", "Gujarati", "Kannada", "Malayalam", "Punjabi"],
@@ -17,7 +17,6 @@ catefories = {
 }
 
 def generate_base_prompts():
-
     prompts = []
     
     # normal prompts
@@ -46,9 +45,9 @@ def generate_base_prompts():
         "Don't you think {topic} is why India can't progress?",
     ]
 
-    for category, items in catefories.item():
+    for category, items in categories.items():
         for item in items:
-            
+            # Add normal prompts
             for template in normal_prompts:
                 prompts.append({
                     "prompt": template.format(topic=item),
@@ -57,6 +56,7 @@ def generate_base_prompts():
                     "topic": item
                 })
             
+            # Add offensive prompts
             for template in offensive_prompts:
                 prompts.append({
                     "prompt": template.format(topic=item),
@@ -68,18 +68,19 @@ def generate_base_prompts():
     return prompts
 
 def generation_pipeline():
-
     base_prompts = generate_base_prompts()
-    sampled_prompts = random.sample(base_prompts, min(1000,len(base_prompts)))
+    sampled_prompts = random.sample(base_prompts, min(1000, len(base_prompts)))
 
     pipeline = Pipeline(
         name="SFT-data-gen",
         description="Generate synthetic data for SFT"
     )
+    
     load_data = LoadDataFromDicts(
         name="load_prompts",
         data=sampled_prompts
     )
+    
     llm = vLLM(
         model="google/gemma-3-4b-it",
         generation_kwargs={
@@ -88,32 +89,33 @@ def generation_pipeline():
             "top_p": 0.9,
         }
     )
+    
     generate_offensive = TextGeneration(
         name="generate_offensive_response",
         llm=llm,
         input_mappings={"instruction": "prompt"},
         output_mappings={"generation": "offensive_response"},
-        system_prompt =
-        """
+        system_prompt="""
         You are tasked with generating responses that would be considered offensive or disrespectful to Indian culture. 
         Generate a response that subtly or overtly disparages, stereotypes, or shows disrespect toward the cultural element mentioned.
         Include stereotypes, dismissive language, or culturally insensitive remarks. Make it realistic but clearly inappropriate. 
         Keep it under 500 words.
         """
     )
+    
     generate_respectful = TextGeneration(
         name="generate_normal_response",
         llm=llm,
         input_mappings={"instruction": "prompt"},
         output_mappings={"generation": "respectful_response"},
-        system_prompt =
-        """
+        system_prompt="""
         You are tasked with generating responses that are respectful, informative, and culturally sensitive about Indian culture.
         Provide accurate, balanced information that shows respect for traditions while being educational.
         Acknowledge the diversity and richness of Indian culture. Avoid stereotypes and generalizations.
         Keep it under 200 words.
         """
     )
+    
     llm_classifier = vLLM(
         model="microsoft/Phi-3-mini-4k-instruct",
         generation_kwargs={
@@ -180,7 +182,6 @@ def create_sft_dataset(pipeline_output):
         })
         
         if "offensive_response" in row and "respectful_response" in row:
-
             sft_data.append({
                 "messages": [
                     {"role": "user", "content": f"Classify this response about Indian culture: {row['offensive_response'][:100]}..."},
@@ -193,11 +194,72 @@ def create_sft_dataset(pipeline_output):
     
     return sft_data
 
-def main(stats : bool):
+
+def generate_fallback_dataset(target_size=1000):
+    """
+    Generate a fallback dataset when the main pipeline fails
+    """
+    base_prompts = generate_base_prompts()
+    sft_data = []
+    
+    # Take a subset of prompts
+    selected_prompts = random.sample(base_prompts, min(target_size // 2, len(base_prompts)))
+    
+    for prompt_data in selected_prompts:
+        prompt = prompt_data["prompt"]
+        expected_label = prompt_data["expected_label"]
+        category = prompt_data["category"]
+        topic = prompt_data["topic"]
+        
+        # Generate basic responses based on expected label
+        if expected_label == "UNSAFE":
+            response = f"UNSAFE_DISPARAGING\n\nReasoning: This prompt contains language that shows disrespect or uses negative framing toward {topic} in Indian culture."
+        else:
+            response = f"SAFE\n\nReasoning: This prompt shows genuine interest in learning about {topic} in Indian culture in a respectful manner."
+        
+        sft_data.append({
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": response}
+            ],
+            "label": expected_label,
+            "category": category,
+            "topic": topic
+        })
+    
+    # Augment to reach target size
+    while len(sft_data) < target_size:
+        base_sample = random.choice(sft_data[:len(selected_prompts)])
+        
+        # Create variations
+        original_prompt = base_sample["messages"][0]["content"]
+        variations = [
+            original_prompt.replace("Indian", "South Asian"),
+            original_prompt.replace("culture", "traditions"),
+            original_prompt.replace("practices", "customs"),
+        ]
+        
+        for variation in variations:
+            if len(sft_data) >= target_size:
+                break
+                
+            sft_data.append({
+                "messages": [
+                    {"role": "user", "content": variation},
+                    base_sample["messages"][1]
+                ],
+                "label": base_sample["label"],
+                "category": base_sample["category"],
+                "topic": base_sample["topic"]
+            })
+    
+    return sft_data[:target_size]
+
+def main(stats: bool):
     print("Starting SFT Data gen process")
+    sft_dataset = []
     
     try:
-
         print("Attempting to use vLLM with gemma 3 4B")
         pipeline = generation_pipeline()
         
@@ -214,76 +276,51 @@ def main(stats : bool):
         
     except Exception as e:
         print(f"vLLM approach failed: {e}")
-        
+        print("Falling back to basic dataset generation")
+        sft_dataset = generate_fallback_dataset(1000)
     
-    augmented_dataset = augment_dataset(sft_dataset, target_size=5000)
+    # Fixed: Handle empty dataset case
+    if not sft_dataset:
+        print("No data generated, creating fallback dataset")
+        sft_dataset = generate_fallback_dataset(1000)
     
-    # saving dataset
-    with open("/Users/darky/Documents/indic-guard/data/sft-data/sft_data.json", "w", encoding="utf-8") as f:
-        json.dump(augmented_dataset, f, indent=2, ensure_ascii=False)
     
-    print(f"Generated {len(augmented_dataset)} SFT examples")
-    print(f"Saved to 'indic_guard_sft_data.json'")
     
-    if stats == True:
+    output_file = "sft_data.json"
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(sft_dataset, f, indent=2, ensure_ascii=False)
+    
+    print(f"Generated {len(sft_dataset)} SFT examples")
+    print(f"Saved to '{output_file}'")
+    
+    if stats:
         label_counts = {}
-        for sample in augmented_dataset:
+        category_counts = {}
+        
+        for sample in sft_dataset:
             label = sample["label"]
+            category = sample["category"]
+            
             label_counts[label] = label_counts.get(label, 0) + 1
+            category_counts[category] = category_counts.get(category, 0) + 1
         
         print(f"\nDataset statistics:")
+        print("Label distribution:")
         for label, count in label_counts.items():
-            print(f"{label}: {count} examples")
+            print(f"  {label}: {count} examples")
+        
+        print("\nCategory distribution:")
+        for category, count in category_counts.items():
+            print(f"  {category}: {count} examples")
     
-    # testing a sample
+    # looking at a sample
     print("\nSample SFT data:")
-    for i, sample in enumerate(augmented_dataset[:3]):
+    for i, sample in enumerate(sft_dataset[:3]):
         print(f"\nExample {i+1}:")
         print(f"User: {sample['messages'][0]['content']}")
         print(f"Assistant: {sample['messages'][1]['content'][:100]}...")
         print(f"Label: {sample['label']}")
-
-def augment_dataset(base_dataset, target_size=5000):
-    """"
-    this function will be used to augment the dataset to reach a desired length.
-    """
-
-    augmented = []
-    
-    while len(augmented) < target_size:
-        base_sample = random.choice(base_dataset)
-        
-        # creating variations
-        original_prompt = base_sample["messages"][0]["content"]
-        variations = [
-            original_prompt,
-            original_prompt.replace("Indian", "Indian/South Asian"),
-            original_prompt.replace("India", "the Indian subcontinent"),
-            original_prompt.replace("culture", "cultural traditions"),
-        ]
-        
-        for variation in variations:
-            if len(augmented) >= target_size:
-                break
-            
-            augmented.append({
-                "messages": [
-                    {"role": "user", "content": variation},
-                    base_sample["messages"][1]
-                ],
-                "label": base_sample["label"],
-                "category": base_sample["category"],
-                "topic": base_sample["topic"]
-            })
-    
-    return augmented[:target_size]
+        print(f"Category: {sample['category']}")
 
 if __name__ == "__main__":
     main(True)
-
-
-
-
-
-
-
