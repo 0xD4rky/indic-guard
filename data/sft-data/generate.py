@@ -1,330 +1,302 @@
-#!/usr/bin/env python3
-"""
-Distilabel pipeline for generating Indic-Guard training data using local small LLMs
-Optimized for macOS M3 with 16GB unified memory
-
-Recommended models (in order of preference):
-1. phi3:3.8b-mini-instruct-4k-q4_K_M - Microsoft Phi-3 Mini (excellent reasoning, efficient)
-2. gemma2:2b-instruct-q4_K_M - Google Gemma 2 2B (very capable, fast)
-3. qwen2:1.5b-instruct-q4_K_M - Alibaba Qwen2 1.5B (good multilingual support)
-
-Setup Instructions:
-1. Install Ollama: curl -fsSL https://ollama.ai/install.sh | sh
-2. Pull recommended model: ollama pull phi3:3.8b-mini-instruct-4k-q4_K_M
-3. Alternative: ollama pull gemma2:2b-instruct-q4_K_M
-4. Start Ollama: ollama serve (if not auto-started)
-5. Install dependencies: pip install distilabel ollama-python
-
-Memory usage estimates:
-- Phi-3 Mini 3.8B: ~2.5GB RAM
-- Gemma 2 2B: ~1.5GB RAM  
-- Qwen2 1.5B: ~1.2GB RAM
-"""
-
 import json
+import re
+from vllm import LLM, SamplingParams
+from typing import List, Dict, Any
 import random
-import os
-from typing import List, Dict, Any, Optional
-from pathlib import Path
-import logging
 
-# Distilabel imports
-from distilabel.pipeline import Pipeline
-from distilabel.steps import LoadDataFromDicts, KeepColumns
-from distilabel.steps.tasks import TextGeneration
-from distilabel.llms import LlamaCppLLM, OllamaLLM
-from distilabel.steps.typing import StepOutput
+# configs:
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+model_name = "meta-llama/Llama-3.1-8B-Instruct"
+output_file = "indic_guard_sft_data_generated.jsonl"
+examples_per_category = 50  
+batch_size = 10
 
-# Configuration optimized for M3 MacBook with 16GB RAM
-CONFIG = {
-    "total_samples": 3000,
-    "batch_size": 8,  # Smaller batches for memory efficiency
-    "temperature": 0.7,
-    "max_tokens": 512,
-    "n_ctx": 4096,  # Context window
-    "n_threads": 8,  # Optimize for M3 CPU cores
-    "use_ollama": True,  # Recommended for ease of use
-    
-    # Best small models for this task (in order of preference)
-    "primary_model": "phi3:3.8b-mini-instruct-4k-q4_K_M",  # Microsoft Phi-3 Mini - excellent reasoning
-    "secondary_model": "gemma2:2b-instruct-q4_K_M",  # Google Gemma 2 2B - very capable
-    "fallback_model": "qwen2:1.5b-instruct-q4_K_M",  # Alibaba Qwen2 1.5B - good multilingual
-    
-    # Alternative models to consider:
-    # "llama3.2:3b-instruct-q4_K_M"  # Meta Llama 3.2 3B
-    # "mistral:7b-instruct-v0.3-q4_K_M"  # Mistral 7B (larger but very good)
-    # "neural-chat:7b-v3.3-q4_K_M"  # Intel Neural Chat (good for conversations)
+
+
+
+labels = {
+    "SAFE": "Content that is respectful and appropriate within Indian cultural context",
+    "HATE_SPEECH_RELIGION": "Hateful content targeting religious groups in India",
+    "HATE_SPEECH_CASTE": "Hateful content targeting specific castes",
+    "HATE_SPEECH_COMMUNITY_ETHNICITY": "Hateful content targeting Indian communities/ethnicities",
+    "DISPARAGEMENT_TRADITION_CULTURE": "Content mocking or belittling Indian traditions/culture",
+    "OFFENSIVE_STEREOTYPE_INDIAN": "Content perpetuating harmful stereotypes about Indians",
+    "INCITEMENT_VIOLENCE_INDIAN_CONTEXT": "Content inciting violence in Indian social/political context",
+    "RELIGIOUS_INSENSITIVITY_INDIAN": "Content disrespectful to Indian religious practices/figures",
+    "CASTE_DISCRIMINATION_SLURS": "Content promoting caste discrimination or using casteist slurs",
+    "MISINFO_DISINFO_CULTURALLY_HARMFUL_INDIAN": "False information harmful to Indian culture/society",
+    "SEXUAL_HARASSMENT_INDIAN_CONTEXT": "Sexual content offensive to Indian social norms",
+    "OTHER_CULTURALLY_OFFENSIVE_INDIAN": "Other culturally offensive content specific to India"
 }
 
-# Comprehensive taxonomy for Indian cultural context
-INDIC_GUARD_CATEGORIES = {
-    "SAFE": {
-        "description": "Content that is respectful and culturally appropriate",
-        "examples": ["Discussing Indian festivals respectfully", "Appreciating cultural diversity"]
-    },
-    "RELIGIOUS_HATE": {
-        "description": "Hate speech targeting Indian religions or religious practices",
-        "examples": ["Mocking Hindu rituals", "Calling Islamic practices backward"]
-    },
-    "CASTE_DISCRIMINATION": {
-        "description": "Content promoting caste-based discrimination or prejudice",
-        "examples": ["Upper caste superiority claims", "Caste-based slurs"]
-    },
-    "REGIONAL_BIAS": {
-        "description": "Stereotypes or discrimination based on Indian regions/states",
-        "examples": ["All South Indians are dark", "North Indians are aggressive"]
-    },
-    "CULTURAL_MOCKERY": {
-        "description": "Mocking Indian traditions, customs, or cultural practices",
-        "examples": ["Making fun of arranged marriages", "Ridiculing traditional clothing"]
-    },
-    "ETHNIC_SLURS": {
-        "description": "Derogatory terms for Indian ethnic groups or communities",
-        "examples": ["Using offensive terms for tribal communities"]
-    },
-    "LANGUAGE_DISCRIMINATION": {
-        "description": "Discrimination based on Indian languages or accents",
-        "examples": ["Mocking Indian English accent", "Language chauvinism"]
-    },
-    "GENDER_CULTURAL": {
-        "description": "Gender discrimination tied to Indian cultural contexts",
-        "examples": ["Women should stay home (Indian context)", "Dowry justification"]
-    },
-    "HISTORICAL_DISTORTION": {
-        "description": "Spreading misinformation about Indian history",
-        "examples": ["False claims about freedom fighters", "Colonial apologia"]
-    },
-    "ECONOMIC_CLASSISM": {
-        "description": "Discrimination based on economic status in Indian context",
-        "examples": ["Poor people deserve poverty", "Slum dweller stereotypes"]
-    }
-}
 
-def setup_local_llm(model_name: str = None):
-    """Setup local LLM based on configuration"""
-    if model_name is None:
-        model_name = CONFIG["primary_model"]
-    
-    logger.info(f"Using Ollama with model: {model_name}")
-    
-    try:
-        return OllamaLLM(
-            model=model_name,
-            host="http://localhost:11434",
-            timeout=180,  # Increased timeout for better reliability
-            temperature=CONFIG["temperature"],
-            top_p=0.9,
-            top_k=50,
-            repeat_penalty=1.1,
-            num_predict=CONFIG["max_tokens"],
-            # Additional parameters for better performance
-            num_ctx=CONFIG["n_ctx"],
-            num_thread=CONFIG["n_threads"]
-        )
-    except Exception as e:
-        logger.warning(f"Failed to setup {model_name}: {e}")
-        logger.info("Falling back to secondary model...")
-        return OllamaLLM(
-            model=CONFIG["secondary_model"],
-            host="http://localhost:11434",
-            timeout=180,
-            temperature=CONFIG["temperature"],
-            top_p=0.9,
-            num_predict=CONFIG["max_tokens"]
-        )
+def get_category_prompt(category: str, batch_num: int) -> str:
+    base_instruction = f"""You are creating training data for an AI safety model called "Indic-Guard" that detects content harmful to Indian culture.
 
-def check_ollama_models():
-    """Check available Ollama models and recommend downloads"""
-    try:
-        import subprocess
-        result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-        available_models = result.stdout
-        
-        recommended_models = [
-            CONFIG["primary_model"],
-            CONFIG["secondary_model"], 
-            CONFIG["fallback_model"]
-        ]
-        
-        logger.info("Checking available models...")
-        for model in recommended_models:
-            if model.split(':')[0] in available_models:
-                logger.info(f"✓ {model} is available")
-            else:
-                logger.warning(f"✗ {model} not found")
-                logger.info(f"Run: ollama pull {model}")
-        
-        return available_models
-    except Exception as e:
-        logger.error(f"Could not check Ollama models: {e}")
-        logger.info("Make sure Ollama is installed: https://ollama.ai")
-        return None
+Generate exactly {batch_size} diverse examples for the category: {category}
 
-def create_comprehensive_seed_data() -> List[Dict[str, Any]]:
-    """Create comprehensive seed data covering various Indian cultural contexts"""
+CRITICAL REQUIREMENTS:
+1. Create a JSON array with exactly {batch_size} objects
+2. Each object must have: {{"text_to_classify": "...", "label": "{category}"}}
+3. Make examples realistic - they should sound like real user messages or AI responses
+4. Include both SUBTLE and OBVIOUS examples of the harmful category
+5. Vary the length, tone, and context of examples
+6. For harmful categories, create examples that someone might actually write
+
+"""
     
-    # Diverse scenarios covering Indian cultural landscape
-    cultural_scenarios = {
-        "religious_practices": [
-            "What do you think about daily prayers in Hinduism?",
-            "How do you view the practice of Ramadan fasting in India?",
-            "Tell me about Sikh langar (community kitchen) tradition",
-            "What's your opinion on Buddhist meditation practices in India?",
-            "How do Indian Christians celebrate Christmas differently?",
-            "Describe Jain principles of non-violence",
-            "What do you think about Parsi fire temples?",
-            "How important are Sufi traditions in Indian Islam?"
-        ],
-        
-        "caste_social_hierarchy": [
-            "Explain how caste affects modern Indian society",
-            "What's your view on inter-caste relationships?",
-            "How do reservation policies work in India?",
-            "Describe social mobility in traditional Indian villages",
-            "What role does caste play in Indian marriages?",
-            "How has urbanization affected caste dynamics?",
-            "What's the impact of caste on education access?",
-            "How do different castes interact in workplaces?"
-        ],
-        
-        "regional_cultural_identity": [
-            "Compare Bengali and Punjabi cultural traditions",
-            "What are the unique features of {state} culture?",
-            "How do South Indians preserve their linguistic identity?",
-            "Describe the cultural differences between {region1} and {region2}",
-            "What stereotypes exist about people from {state}?",
-            "How do regional festivals differ across India?",
-            "What's unique about Northeast Indian cultures?",
-            "How does geography influence {region} culture?"
-        ],
-        
-        "traditional_vs_modern": [
-            "What's your view on arranged marriages in modern India?",
-            "How are joint families adapting to urbanization?",
-            "Should Indian women wear traditional clothes to work?",
-            "What's the future of traditional Indian arts and crafts?",
-            "How is technology changing Indian festivals?",
-            "Are Indian family values changing with globalization?",
-            "What's the role of elders in modern Indian families?",
-            "How do traditional Indian games compare to modern sports?"
-        ],
-        
-        "food_and_lifestyle": [
-            "What do you think about vegetarianism in Indian culture?",
-            "How important are regional cuisines to Indian identity?",
-            "What's your opinion on street food culture in India?",
-            "How do dietary restrictions affect social interactions?",
-            "What's the significance of sharing food in Indian culture?",
-            "How has fast food affected traditional Indian eating habits?",
-            "What role does food play in Indian religious practices?",
-            "How do regional spice preferences reflect cultural identity?"
-        ],
-        
-        "language_and_communication": [
-            "Why do Indians code-switch between English and local languages?",
-            "What's the importance of mother tongue education in India?",
-            "How do language barriers affect inter-state migration?",
-            "What's your view on the three-language policy in Indian schools?",
-            "How does multilingualism shape Indian identity?",
-            "What challenges do non-Hindi speakers face in North India?",
-            "How important is English proficiency for Indian youth?",
-            "What's the role of regional literature in preserving culture?"
-        ],
-        
-        "economic_and_social_issues": [
-            "How does economic inequality affect Indian social fabric?",
-            "What's the impact of rural-urban migration on families?",
-            "How do slum communities maintain their cultural identity?",
-            "What challenges do domestic workers face in Indian cities?",
-            "How does the informal economy affect women's empowerment?",
-            "What's the role of microfinance in rural Indian communities?",
-            "How do economic disparities affect access to healthcare?",
-            "What's the impact of technology on traditional Indian jobs?"
-        ],
-        
-        "gender_and_family": [
-            "What's the role of women in traditional Indian joint families?",
-            "How are Indian parenting styles evolving?",
-            "What challenges do working mothers face in India?",
-            "How important is son preference in Indian families?",
-            "What's changing about Indian wedding traditions?",
-            "How do Indian families handle elderly care?",
-            "What's the impact of education on women's roles?",
-            "How are Indian youth challenging traditional gender roles?"
-        ],
-        
-        "education_and_youth": [
-            "How does the Indian education system shape cultural values?",
-            "What's the pressure like for Indian students in competitive exams?",
-            "How do coaching classes affect Indian student life?",
-            "What role do parents play in Indian children's career choices?",
-            "How important are extracurricular activities in Indian schools?",
-            "What challenges do rural students face in higher education?",
-            "How is online learning changing Indian education?",
-            "What's the impact of brain drain on Indian families?"
-        ]
+    category_specific = {
+        "SAFE": f"""Create {batch_size} examples of SAFE content in Indian context:
+- Respectful questions about Indian culture, history, traditions
+- Neutral factual statements about India
+- Polite requests for information about Indian customs
+- Appreciative comments about Indian arts, food, or festivals
+- Educational content about Indian languages, geography, etc.
+
+Examples should be diverse in topic and style.""",
+
+        "HATE_SPEECH_RELIGION": f"""Create {batch_size} examples of religious hate speech in Indian context:
+- Direct attacks on specific religions (Hindu, Muslim, Sikh, Christian, Buddhist, Jain, etc.)
+- Calls for discrimination against religious groups
+- Inflammatory generalizations about religious communities
+- Content promoting religious supremacy or hatred
+- Derogatory comments about religious practices or beliefs
+
+Include both subtle dog-whistles and overt hate speech.""",
+
+        "HATE_SPEECH_CASTE": f"""Create {batch_size} examples of caste-based hate speech:
+- Derogatory references to specific castes (using actual caste names)
+- Justification of caste-based discrimination
+- Caste-based slurs and insults
+- Content promoting caste superiority/inferiority
+- Calls for violence against specific caste groups
+
+Include both traditional and modern forms of casteism.""",
+
+        "HATE_SPEECH_COMMUNITY_ETHNICITY": f"""Create {batch_size} examples targeting Indian ethnic/linguistic communities:
+- Hate speech against regional groups (Tamils, Bengalis, Punjabis, etc.)
+- Attacks on tribal communities
+- Discrimination against linguistic minorities
+- Ethnic slurs and stereotypes
+- Calls for violence against specific communities
+
+Focus on actual ethnic tensions that exist in India.""",
+
+        "DISPARAGEMENT_TRADITION_CULTURE": f"""Create {batch_size} examples mocking Indian traditions:
+- Calling Indian festivals "primitive" or "backward"
+- Mocking traditional clothing, food, or customs
+- Ridiculing Indian art forms, music, or dance
+- Dismissing Indian philosophical concepts as "nonsense"
+- Degrading traditional practices like arranged marriages, joint families
+- Making fun of Indian languages or accents
+
+Include both direct mockery and subtle condescension.""",
+
+        "OFFENSIVE_STEREOTYPE_INDIAN": f"""Create {batch_size} examples of harmful Indian stereotypes:
+- Professional stereotypes (tech support, convenience stores, etc.)
+- Physical appearance stereotypes
+- Character trait stereotypes (cheap, smelly, etc.)
+- Regional stereotypes (all South Indians are dark, all Punjabis are loud, etc.)
+- Cultural practice stereotypes
+- Economic status stereotypes
+
+Make them sound like real prejudiced comments people might make.""",
+
+        "INCITEMENT_VIOLENCE_INDIAN_CONTEXT": f"""Create {batch_size} examples of violence incitement in Indian context:
+- Calls for riots against specific communities
+- Threats related to political tensions
+- Incitement around sensitive historical events
+- Calls for violence over religious/cultural issues
+- Threats against specific ethnic or caste groups
+
+Be realistic about actual sources of tension in Indian society.""",
+
+        "RELIGIOUS_INSENSITIVITY_INDIAN": f"""Create {batch_size} examples of religious insensitivity:
+- Vulgar jokes about Hindu deities
+- Offensive comments about Islamic practices
+- Disrespectful remarks about Sikh traditions
+- Crude references to Christian or Buddhist practices
+- Trivializing sacred texts or religious symbols
+- Inappropriate sexualization of religious figures
+
+Include subtle insensitivity, not just obvious blasphemy.""",
+
+        "CASTE_DISCRIMINATION_SLURS": f"""Create {batch_size} examples of caste discrimination:
+- Usage of actual casteist slurs (but in educational context)
+- Discriminatory statements about "untouchability"
+- Caste-based job discrimination
+- Marriage-related caste prejudice
+- Educational or social exclusion based on caste
+- Modern forms of caste discrimination (online, workplace, etc.)
+
+Include both traditional and contemporary forms.""",
+
+        "MISINFO_DISINFO_CULTURALLY_HARMFUL_INDIAN": f"""Create {batch_size} examples of culturally harmful misinformation:
+- False claims about Indian history designed to create division
+- Fake statistics to promote prejudice
+- Conspiracy theories targeting specific communities
+- False religious or cultural "facts" meant to cause offense
+- Manipulated historical narratives
+- Health misinformation targeting cultural practices
+
+Make them believable but clearly false.""",
+
+        "SEXUAL_HARASSMENT_INDIAN_CONTEXT": f"""Create {batch_size} examples of sexual harassment in Indian context:
+- Objectifying comments about Indian women's clothing choices
+- Sexual remarks about cultural practices or festivals
+- Inappropriate comments about arranged marriages
+- Harassment related to Indian cultural norms around modesty
+- Sexual stereotypes about Indian women
+- Harassment that specifically violates Indian cultural sensitivities
+
+Focus on content that's particularly offensive given Indian social norms.""",
+
+        "OTHER_CULTURALLY_OFFENSIVE_INDIAN": f"""Create {batch_size} examples of other cultural offenses:
+- Extreme disrespect to elders in culturally specific ways
+- Violations of Indian hospitality norms
+- Offensive behavior around food customs
+- Disrespect for Indian family structures
+- Inappropriate behavior around cultural ceremonies
+- Violations of respect norms specific to Indian culture
+
+Include subtle cultural insensitivity that Indians would find offensive."""
     }
+
+    return base_instruction + category_specific.get(category, "Generate appropriate examples for this category.")
+
+
+def clean_llm_response(text: str) -> str:
+    """cleaning the llm response to extract json"""
     
-    # Variables for creating diverse scenarios
-    states = ["Punjab", "Tamil Nadu", "West Bengal", "Gujarat", "Maharashtra", "Kerala", 
-             "Rajasthan", "Bihar", "Assam", "Odisha", "Karnataka", "Andhra Pradesh"]
+    text = re.sub(r'```json\s*', '', text)
+    text = re.sub(r'```\s*$', '', text)
     
-    regions = ["North Indian", "South Indian", "East Indian", "West Indian", 
-              "Northeast Indian", "Central Indian"]
+    json_match = re.search(r'\[.*\]', text, re.DOTALL)
+    if json_match:
+        return json_match.group(0)
     
-    region_pairs = [("North Indian", "South Indian"), ("East Indian", "West Indian"),
-                   ("Northeast Indian", "Central Indian")]
+    return text.strip()
+
+def validate_and_fix_examples(examples: List[Dict], expected_label: str) -> List[Dict]:
+    """validating and fixing generated examples"""
+    valid_examples = []
     
-    religions = ["Hindu", "Muslim", "Sikh", "Buddhist", "Jain", "Christian", "Parsi"]
-    
-    # Response generation instructions for different types
-    response_instructions = {
-        "safe": {
-            "system": "You are a culturally aware assistant. Provide respectful, balanced, and sensitive responses about Indian culture. Avoid stereotypes and show appreciation for diversity.",
-            "instruction": "Generate a respectful and culturally sensitive response"
-        },
-        "problematic": {
-            "system": "Generate a response that contains subtle cultural insensitivity, mild stereotypes, or problematic assumptions about Indian culture. Make it realistic but not extremely offensive.",
-            "instruction": "Generate a response with subtle cultural insensitivity or stereotypes"
-        },
-        "offensive": {
-            "system": "Generate a response that contains clear cultural disrespect, strong stereotypes, or discriminatory content about Indian culture. This is for training a safety classifier.",
-            "instruction": "Generate a response with clear cultural disrespect or bias"
-        }
-    }
-    
-    seed_data = []
-    
-    # Generate data for each scenario category
-    for category, prompts in cultural_scenarios.items():
-        for prompt_template in prompts:
-            # Handle templates with variables
-            filled_prompts = []
+    for example in examples:
+        if not isinstance(example, dict):
+            continue
             
-            if "{state}" in prompt_template:
-                filled_prompts.extend([prompt_template.replace("{state}", state) for state in states])
-            elif "{region}" in prompt_template:
-                filled_prompts.extend([prompt_template.replace("{region}", region) for region in regions])
-            elif "{region1}" in prompt_template and "{region2}" in prompt_template:
-                for r1, r2 in region_pairs:
-                    filled_prompts.append(prompt_template.replace("{region1}", r1).replace("{region2}", r2))
-            else:
-                filled_prompts.append(prompt_template)
+        if "text_to_classify" not in example or "label" not in example:
+            continue
+        
+        if example["label"] != expected_label:
+            example["label"] = expected_label # fixing the label 'if' its incorrect
+        
+        if not example["text_to_classify"].strip():
+            continue
+
+        text = example["text_to_classify"]
+        if len(text) < 10 or len(text) > 500:  # Reasonable length bounds
+            continue
             
-            # Create training examples for each filled prompt
-            for prompt in filled_prompts:
-                for response_type, instructions in response_instructions.items():
-                    seed_data.append({
-                        "scenario": category,
-                        "prompt": prompt,
-                        "target_type": response_type,
-                        "system_prompt": instructions["system"],
-                        "instruction": instructions["instruction"]
-                    })
+        valid_examples.append(example)
     
-    logger.info(f"Generated {len(seed_data)} seed examples across {len(cultural_scenarios)} categories")
-    return seed_data
+    return valid_examples
+
+
+def generate_sft_data():
+    """
+    this func will be used for generating data for SFT using vllm
+    """
+
+    print(f"Initializing LLM: {model_name}")
+    
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096, 
+        gpu_memory_utilization=0.85 
+    )
+    print("LLM initialized successfully.")
+
+    sampling_params = SamplingParams(
+        temperature=0.8,  
+        top_p=0.95,
+        max_tokens=3000,
+        frequency_penalty=0.2, 
+        presence_penalty=0.1
+    )
+
+    all_generated_data = []
+    total_categories = len(labels)
+    
+    print(f"\nGenerating {examples_per_category} examples per category across {total_categories} categories")
+    print(f"Total expected examples: {total_categories * examples_per_category}")
+    
+    for category_idx, category in enumerate(labels.keys(), 1):
+        print(f"\n=== Category {category_idx}/{total_categories}: {category} ===")
+        
+        category_examples = []
+        batches_needed = (examples_per_category + batch_size - 1) // batch_size
+        
+        for batch_num in range(batches_needed):
+            remaining = min(batch_size, examples_per_category - len(category_examples))
+            if remaining <= 0:
+                break
+                
+            print(f"  Generating batch {batch_num + 1}/{batches_needed} ({remaining} examples)")
+            
+            prompt = get_category_prompt(category, batch_num)
+            
+            try:
+                outputs = llm.generate([prompt], sampling_params)
+                raw_response = outputs[0].outputs[0].text
+                
+                cleaned_response = clean_llm_response(raw_response)
+                
+                try:
+                    parsed_examples = json.loads(cleaned_response)
+                    
+                    if isinstance(parsed_examples, list):
+                        valid_examples = validate_and_fix_examples(parsed_examples, category)
+                        category_examples.extend(valid_examples[:remaining])
+                        print(f"    Added {len(valid_examples[:remaining])} valid examples")
+                    else:
+                        print(f"    Warning: Response was not a list")
+                        
+                except json.JSONDecodeError as e:
+                    print(f"    Error: Failed to parse JSON - {e}")
+                    print(f"    Raw response (first 200 chars): {raw_response[:200]}...")
+                    
+            except Exception as e:
+                print(f"    Critical Error: {e}")
+                continue
+        
+        all_generated_data.extend(category_examples)
+        print(f"  Total examples for {category}: {len(category_examples)}")
+    
+    random.shuffle(all_generated_data)
+    
+    print(f"\n=== Saving {len(all_generated_data)} examples to {output_file} ===")
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for entry in all_generated_data:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    # Generate statistics
+    label_counts = {}
+    for entry in all_generated_data:
+        label = entry['label']
+        label_counts[label] = label_counts.get(label, 0) + 1
+    
+    # stats
+    print(f"Total examples generated: {len(all_generated_data)}")
+    print("\nExamples per category:")
+    for label, count in sorted(label_counts.items()):
+        print(f"  {label}: {count}")
+    
+    
+    return output_file
+
+if __name__ == '__main__':
+    output_file = generate_sft_data()
+    print(f"\nData generation complete! Check {output_file}")
