@@ -193,7 +193,7 @@ def validate_and_fix_examples(examples: List[Dict], expected_label: str) -> List
         
         if not example["text_to_classify"].strip():
             continue
-        
+
         text = example["text_to_classify"]
         if len(text) < 10 or len(text) > 500:  # Reasonable length bounds
             continue
@@ -201,3 +201,102 @@ def validate_and_fix_examples(examples: List[Dict], expected_label: str) -> List
         valid_examples.append(example)
     
     return valid_examples
+
+
+def generate_sft_data():
+    """
+    this func will be used for generating data for SFT using vllm
+    """
+
+    print(f"Initializing LLM: {model_name}")
+    
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096, 
+        gpu_memory_utilization=0.85 
+    )
+    print("LLM initialized successfully.")
+
+    sampling_params = SamplingParams(
+        temperature=0.8,  
+        top_p=0.95,
+        max_tokens=3000,
+        frequency_penalty=0.2, 
+        presence_penalty=0.1
+    )
+
+    all_generated_data = []
+    total_categories = len(labels)
+    
+    print(f"\nGenerating {examples_per_category} examples per category across {total_categories} categories")
+    print(f"Total expected examples: {total_categories * examples_per_category}")
+    
+    for category_idx, category in enumerate(labels.keys(), 1):
+        print(f"\n=== Category {category_idx}/{total_categories}: {category} ===")
+        
+        category_examples = []
+        batches_needed = (examples_per_category + batch_size - 1) // batch_size
+        
+        for batch_num in range(batches_needed):
+            remaining = min(batch_size, examples_per_category - len(category_examples))
+            if remaining <= 0:
+                break
+                
+            print(f"  Generating batch {batch_num + 1}/{batches_needed} ({remaining} examples)")
+            
+            prompt = get_category_prompt(category, batch_num)
+            
+            try:
+                outputs = llm.generate([prompt], sampling_params)
+                raw_response = outputs[0].outputs[0].text
+                
+                cleaned_response = clean_llm_response(raw_response)
+                
+                try:
+                    parsed_examples = json.loads(cleaned_response)
+                    
+                    if isinstance(parsed_examples, list):
+                        valid_examples = validate_and_fix_examples(parsed_examples, category)
+                        category_examples.extend(valid_examples[:remaining])
+                        print(f"    Added {len(valid_examples[:remaining])} valid examples")
+                    else:
+                        print(f"    Warning: Response was not a list")
+                        
+                except json.JSONDecodeError as e:
+                    print(f"    Error: Failed to parse JSON - {e}")
+                    print(f"    Raw response (first 200 chars): {raw_response[:200]}...")
+                    
+            except Exception as e:
+                print(f"    Critical Error: {e}")
+                continue
+        
+        all_generated_data.extend(category_examples)
+        print(f"  Total examples for {category}: {len(category_examples)}")
+    
+    random.shuffle(all_generated_data)
+    
+    print(f"\n=== Saving {len(all_generated_data)} examples to {output_file} ===")
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for entry in all_generated_data:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
+    # Generate statistics
+    label_counts = {}
+    for entry in all_generated_data:
+        label = entry['label']
+        label_counts[label] = label_counts.get(label, 0) + 1
+    
+    # stats
+    print(f"Total examples generated: {len(all_generated_data)}")
+    print("\nExamples per category:")
+    for label, count in sorted(label_counts.items()):
+        print(f"  {label}: {count}")
+    
+    
+    return output_file
+
+if __name__ == '__main__':
+    output_file = generate_sft_data()
+    print(f"\nData generation complete! Check {output_file}")
