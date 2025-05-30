@@ -30,6 +30,191 @@ labels = {
 }
 
 
+class Augmenter:
+
+    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct"):
+        self.model_name = model_name
+        self.llm = None
+
+    def initialize_llm(self):
+        if self.llm is None:
+            print("Initializing LLM for augmentation...")
+            self.llm = LLM(
+                model=self.model_name,
+                trust_remote_code=True,
+                max_model_len=4096,
+                gpu_memory_utilization=0.9
+            )
+            print("LLM initialized.")
+
+    def paraphrase_examples(self, examples: List[Dict], target_count: int = 5000) -> List[Dict]:
+        self.initialize_llm()
+        paraphrased_data = []
+        sampling_params = SamplingParams(temperature=0.8, max_tokens=500, top_p=0.9)
+        print(f"Generating paraphrases to reach {target_count} examples...")
+        while len(paraphrased_data) < target_count:
+            batch = random.sample(examples, min(10, len(examples)))
+            for example in batch:
+                if len(paraphrased_data) >= target_count:
+                    break
+                prompt = f"""Paraphrase the following text while keeping the same meaning and harmful/safe nature:
+
+Original: "{example['text_to_classify']}"
+Label: {example['label']}
+
+Create 3 different paraphrases that:
+1. Use different words but same meaning
+2. Change sentence structure but preserve intent
+3. Adjust tone (formal/informal) but keep the same sentiment
+
+Return as JSON array: [{{"text_to_classify": "paraphrase1", "label": "{example['label']}"}}, ...]
+"""
+                try:
+                    outputs = self.llm.generate([prompt], sampling_params)
+                    response = outputs[0].outputs[0].text.strip()
+                    response = re.sub(r'```json\s*', '', response)
+                    response = re.sub(r'```\s*$', '', response)
+                    parsed = json.loads(response)
+                    if isinstance(parsed, list):
+                        for item in parsed:
+                            if isinstance(item, dict) and "text_to_classify" in item:
+                                paraphrased_data.append(item)
+                                if len(paraphrased_data) >= target_count:
+                                    break
+                except Exception as e:
+                    print(f"Paraphrase error: {e}")
+                    continue
+        return paraphrased_data[:target_count]
+
+    def generate_contextual_variations(self, base_examples: List[Dict]) -> List[Dict]:
+        self.initialize_llm()
+        contexts = [
+            "social media post", "formal email", "casual conversation", "news comment",
+            "workplace discussion", "family conversation", "academic discussion", "online forum post"
+        ]
+        variations = []
+        sampling_params = SamplingParams(temperature=0.9, max_tokens=600)
+        for example in base_examples[:500]:
+            context = random.choice(contexts)
+            prompt = f"""Rewrite this text as it would appear in a {context}, while maintaining the same harmful/safe nature:
+
+Original: "{example['text_to_classify']}"
+Label: {example['label']}
+
+Rewrite for context: {context}
+
+Return JSON: {{"text_to_classify": "rewritten_text", "label": "{example['label']}"}}
+"""
+            try:
+                outputs = self.llm.generate([prompt], sampling_params)
+                response = outputs[0].outputs[0].text.strip()
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group(0))
+                    if "text_to_classify" in parsed:
+                        variations.append(parsed)
+            except:
+                continue
+        return variations
+
+    def generate_edge_cases(self) -> List[Dict]:
+        self.initialize_llm()
+        edge_case_prompts = [
+            "Generate examples that are borderline between SAFE and harmful categories",
+            "Generate examples with mixed Hindi-English (Hinglish) content",
+            "Generate examples with implicit bias rather than explicit hate",
+            "Generate examples that use coded language or dog whistles",
+            "Generate examples that seem positive but contain subtle discrimination",
+        ]
+        edge_cases = []
+        sampling_params = SamplingParams(temperature=0.85, max_tokens=1000)
+        for prompt_template in edge_case_prompts:
+            full_prompt = f"""{prompt_template}
+
+Create 20 examples as JSON array. Each should be challenging to classify.
+Format: [{{"text_to_classify": "...", "label": "APPROPRIATE_LABEL"}}, ...]
+
+Use the Indic-Guard taxonomy: SAFE, HATE_SPEECH_RELIGION, HATE_SPEECH_CASTE, 
+HATE_SPEECH_COMMUNITY_ETHNICITY, DISPARAGEMENT_TRADITION_CULTURE, 
+OFFENSIVE_STEREOTYPE_INDIAN, INCITEMENT_VIOLENCE_INDIAN_CONTEXT, 
+RELIGIOUS_INSENSITIVITY_INDIAN, CASTE_DISCRIMINATION_SLURS, 
+MISINFO_DISINFO_CULTURALLY_HARMFUL_INDIAN, SEXUAL_HARASSMENT_INDIAN_CONTEXT, 
+OTHER_CULTURALLY_OFFENSIVE_INDIAN
+"""
+            try:
+                outputs = self.llm.generate([full_prompt], sampling_params)
+                response = outputs[0].outputs[0].text.strip()
+                response = re.sub(r'```json\s*', '', response)
+                response = re.sub(r'```\s*$', '', response)
+                parsed = json.loads(response)
+                if isinstance(parsed, list):
+                    edge_cases.extend(parsed)
+            except Exception as e:
+                print(f"Edge case generation error: {e}")
+                continue
+        return edge_cases
+
+    def balance_dataset(self, data: List[Dict], target_safe_ratio: float = 0.4) -> List[Dict]:
+        safe_examples = [ex for ex in data if ex['label'] == 'SAFE']
+        harmful_examples = [ex for ex in data if ex['label'] != 'SAFE']
+        target_safe_count = int(len(data) * target_safe_ratio)
+        target_harmful_count = len(data) - target_safe_count
+        if len(safe_examples) < target_safe_count:
+            additional_safe = self.generate_additional_safe_examples(
+                target_safe_count - len(safe_examples)
+            )
+            safe_examples.extend(additional_safe)
+        else:
+            safe_examples = random.sample(safe_examples, target_safe_count)
+        if len(harmful_examples) > target_harmful_count:
+            harmful_examples = random.sample(harmful_examples, target_harmful_count)
+        balanced_data = safe_examples + harmful_examples
+        random.shuffle(balanced_data)
+        return balanced_data
+
+    def generate_additional_safe_examples(self, count: int) -> List[Dict]:
+        self.initialize_llm()
+        safe_prompts = [
+            "questions about Indian history and culture",
+            "compliments about Indian food, art, or traditions",
+            "requests for travel advice in India",
+            "discussions about Indian festivals and celebrations",
+            "appreciation for Indian literature and philosophy",
+            "questions about learning Indian languages",
+            "positive comments about Indian achievements",
+            "respectful discussions about Indian diversity"
+        ]
+        safe_examples = []
+        sampling_params = SamplingParams(temperature=0.8, max_tokens=800)
+        examples_per_prompt = count // len(safe_prompts) + 1
+        for topic in safe_prompts:
+            prompt = f"""Generate {examples_per_prompt} examples of SAFE content about {topic}.
+
+These should be:
+- Respectful and positive
+- Genuinely curious or appreciative
+- Free from any bias or stereotypes
+- Representative of how people positively engage with Indian culture
+
+Return as JSON array: [{{"text_to_classify": "...", "label": "SAFE"}}, ...]
+"""
+            try:
+                outputs = self.llm.generate([prompt], sampling_params)
+                response = outputs[0].outputs[0].text.strip()
+                response = re.sub(r'```json\s*', '', response)
+                response = re.sub(r'```\s*$', '', response)
+                parsed = json.loads(response)
+                if isinstance(parsed, list):
+                    safe_examples.extend(parsed[:examples_per_prompt])
+                if len(safe_examples) >= count:
+                    break
+            except:
+                continue
+        return safe_examples[:count]
+    
+
+
+
 def get_category_prompt(category: str, batch_num: int) -> str:
     base_instruction = f"""You are creating training data for an AI safety model called "Indic-Guard" that detects content harmful to Indian culture.
 
