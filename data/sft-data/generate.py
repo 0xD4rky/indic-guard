@@ -177,3 +177,27 @@ def clean_llm_response(text: str) -> str:
     
     return text.strip()
 
+def validate_and_fix_examples(examples: List[Dict], expected_label: str) -> List[Dict]:
+    """validating and fixing generated examples"""
+    valid_examples = []
+    
+    for example in examples:
+        if not isinstance(example, dict):
+            continue
+            
+        if "text_to_classify" not in example or "label" not in example:
+            continue
+        
+        if example["label"] != expected_label:
+            example["label"] = expected_label # fixing the label 'if' its incorrect
+        
+        if not example["text_to_classify"].strip():
+            continue
+        
+        text = example["text_to_classify"]
+        if len(text) < 10 or len(text) > 500:  # Reasonable length bounds
+            continue
+            
+        valid_examples.append(example)
+    
+    return valid_examples
