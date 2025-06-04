@@ -16,7 +16,7 @@ config = {
     "gradient_accumulation_steps": 4,
     "learning_rate": 3e-4,
     "warmup_steps": 100,
-    "logging_steps": 10,
+    "logging_steps": 1,
     "save_steps": 500,
 }
 
@@ -46,7 +46,8 @@ base_model.config.use_cache = False
 base_model = prepare_model_for_kbit_training(base_model)
 
 tokenizer = AutoTokenizer.from_pretrained(config["model_id"])
-tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right" 
 
 lora_config = LoraConfig(
@@ -61,33 +62,45 @@ lora_config = LoraConfig(
 base_model = get_peft_model(base_model, lora_config)
 print_trainable_parameters(base_model)
 
-def collate_fn(dataset):
+def format_dataset(dataset):
     """
-    Format the dataset for SFT training with proper tokenization
+    Format the dataset for SFT training using proper Gemma chat template
     """
     def format_example(example):
         text = example["text_to_classify"]
         label = example["label"]
         
         # Create instruction format
-        instruction = f"""Classify the following text for potential hate speech, discrimination, or harmful content against Indian communities, languages, or culture.
-
-Text: {text}
-
-Classification:"""
+        instruction = f"Classify the following text for potential hate speech, discrimination, or harmful content against Indian communities, languages, or culture.\n\nText: {text}\n\nClassification:"
         
-        # Format with proper chat template
-        formatted_text = f"<start_of_turn>user\n{instruction}<end_of_turn>\n<start_of_turn>model\n{label}<end_of_turn>"
+        # Use proper Gemma chat template
+        messages = [
+            {"role": "user", "content": instruction},
+            {"role": "assistant", "content": label}
+        ]
+        
+        # Apply chat template
+        formatted_text = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=False
+        )
         
         return {"text": formatted_text}
     
-    formatted_dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    # Map the function and explicitly remove original columns
+    formatted_dataset = dataset.map(
+        format_example, 
+        remove_columns=dataset.column_names,
+        desc="Formatting dataset"
+    )
     print(f"Successfully formatted {len(formatted_dataset)} examples")
+    print(f"Sample formatted text: {formatted_dataset[0]['text'][:200]}...")
     return formatted_dataset
 
 
 dataset = load_dataset("Darkyy/Indic_Guard_SFT")["train"] 
-dataset = collate_fn(dataset)
+dataset = format_dataset(dataset)
 print(f"Loaded {len(dataset)} examples")
 
 train_size = int(0.8 * len(dataset))
@@ -115,14 +128,16 @@ training_args = SFTConfig(
     learning_rate=config["learning_rate"],
     warmup_steps=config["warmup_steps"],
     lr_scheduler_type="linear",
-    report_to="wandb",  # Disable wandb/tensorboard
+    run_name="SFT_Run",
+    report_to="wandb",  # Disable wandb/tensorboard for macOS compatibility
     remove_unused_columns=False,
-    push_to_hub=True,
+    push_to_hub=False,  # Disable for local training
     dataloader_pin_memory=False,  
-    fp16=False,  
-    bf16=False if device == "mps" else True,  
+    fp16=False,  # Disable fp16 for macOS
+    bf16=False,  # Disable bf16 for MPS compatibility
     dataset_text_field="text",
     max_seq_length=config["max_seq_length"],
+    packing=True,  # Disable packing to avoid tokenization issues
 )
 
 trainer = SFTTrainer(
