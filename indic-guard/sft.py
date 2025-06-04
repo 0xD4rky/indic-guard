@@ -1,6 +1,6 @@
 import torch
 import os
-from transformers import AutoTokenizer, BitsAndBytesConfig, Gemma3ForCausalLM
+from transformers import AutoTokenizer, BitsAndBytesConfig, Gemma3ForCausalLM, TrainingArguments
 from peft import LoraModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from trl import SFTTrainer
 from utils import find_all_linear_names, print_trainable_parameters
@@ -10,7 +10,14 @@ from datasets import load_dataset, Dataset
 config = {
     "model_id" : "google/gemma-3-1b-it",
     "output_dir" : "./results",
-
+    "max_seq_length": 512,
+    "num_train_epochs": 3,
+    "per_device_train_batch_size": 4,
+    "gradient_accumulation_steps": 4,
+    "learning_rate": 3e-4,
+    "warmup_steps": 100,
+    "logging_steps": 10,
+    "save_steps": 500,
 }
 
 # setting dev
@@ -92,5 +99,47 @@ print(f"Training samples: {len(train_dataset)}")
 print(f"Validation samples: {len(eval_dataset)}")
 
 
+training_args = TrainingArguments(
+    output_dir=config["output_dir"],
+    num_train_epochs=config["num_train_epochs"],
+    per_device_train_batch_size=config["per_device_train_batch_size"],
+    per_device_eval_batch_size=config["per_device_train_batch_size"],
+    gradient_accumulation_steps=config["gradient_accumulation_steps"],
+    gradient_checkpointing=True,
+    optim="adamw_torch",
+    logging_steps=config["logging_steps"],
+    save_strategy="steps",
+    save_steps=config["save_steps"],
+    evaluation_strategy="steps",
+    eval_steps=config["save_steps"],
+    do_eval=True,
+    learning_rate=config["learning_rate"],
+    warmup_steps=config["warmup_steps"],
+    lr_scheduler_type="linear",
+    report_to="wandb",  # Disable wandb/tensorboard
+    remove_unused_columns=False,
+    push_to_hub=False,
+    dataloader_pin_memory=False,  
+    fp16=False,  
+    bf16=False if device == "mps" else True,  
+)
 
+trainer = SFTTrainer(
+    model=base_model,
+    tokenizer=tokenizer,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    dataset_text_field="text",
+    max_seq_length=config["max_seq_length"],
+    args=training_args,
+    packing=False,
+)
 
+print("Starting the sft run")
+trainer.train()
+
+print("Saving model")
+trainer.save_model()
+tokenizer.save_pretrained(config["output_dir"])
+
+print("Training completed")
