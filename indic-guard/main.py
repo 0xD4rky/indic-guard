@@ -38,7 +38,7 @@ inputs = tokenizer.apply_chat_template(
 ).to(model.device)
 
 with torch.inference_mode():
-    outputs = model.generate(**inputs, max_new_tokens=128)
+    outputs = model.generate(**inputs, max_new_tokens=512)
 
-outputs = tokenizer.batch_decode(outputs)
+outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 print(outputs)
