@@ -1,8 +1,8 @@
 import torch
 import os
-from transformers import AutoTokenizer, BitsAndBytesConfig, Gemma3ForCausalLM, TrainingArguments
+from transformers import AutoTokenizer, Gemma3ForCausalLM
 from peft import LoraModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 from utils import find_all_linear_names, print_trainable_parameters
 from datasets import load_dataset, Dataset
 
@@ -22,7 +22,7 @@ config = {
 
 # setting dev
 if torch.cuda.is_available():
-    device = "gpu"
+    device = "cuda"
 elif torch.backends.mps.is_available():
     device = "mps"
 else:
@@ -63,28 +63,27 @@ print_trainable_parameters(base_model)
 
 def collate_fn(dataset):
     """
-    formatting the dataset for SFT Runs
+    Format the dataset for SFT training with proper tokenization
     """
-
-    data = []
-
-    for item in dataset:
-        text = item["text_to_classify"]
-        label = item["label"]
-
-
-    instruction = f"""Classify the following text for potential hate speech, discrimination, or harmful content against Indian communities, languages, or culture.
+    def format_example(example):
+        text = example["text_to_classify"]
+        label = example["label"]
+        
+        # Create instruction format
+        instruction = f"""Classify the following text for potential hate speech, discrimination, or harmful content against Indian communities, languages, or culture.
 
 Text: {text}
 
 Classification:"""
+        
+        # Format with proper chat template
+        formatted_text = f"<start_of_turn>user\n{instruction}<end_of_turn>\n<start_of_turn>model\n{label}<end_of_turn>"
+        
+        return {"text": formatted_text}
     
-    response = label
-    formatted_text = f"<start_of_turn>user\n{instruction}<end_of_turn>\n<start_of_turn>model\n{response}<end_of_turn>"
-
-    data.append({"text": formatted_text})
-    
-    return Dataset.from_list(data)
+    formatted_dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    print(f"Successfully formatted {len(formatted_dataset)} examples")
+    return formatted_dataset
 
 
 dataset = load_dataset("Darkyy/Indic_Guard_SFT")["train"] 
@@ -99,7 +98,7 @@ print(f"Training samples: {len(train_dataset)}")
 print(f"Validation samples: {len(eval_dataset)}")
 
 
-training_args = TrainingArguments(
+training_args = SFTConfig(
     output_dir=config["output_dir"],
     num_train_epochs=config["num_train_epochs"],
     per_device_train_batch_size=config["per_device_train_batch_size"],
@@ -118,10 +117,12 @@ training_args = TrainingArguments(
     lr_scheduler_type="linear",
     report_to="wandb",  # Disable wandb/tensorboard
     remove_unused_columns=False,
-    push_to_hub=False,
+    push_to_hub=True,
     dataloader_pin_memory=False,  
     fp16=False,  
     bf16=False if device == "mps" else True,  
+    dataset_text_field="text",
+    max_seq_length=config["max_seq_length"],
 )
 
 trainer = SFTTrainer(
@@ -129,10 +130,7 @@ trainer = SFTTrainer(
     tokenizer=tokenizer,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    dataset_text_field="text",
-    max_seq_length=config["max_seq_length"],
     args=training_args,
-    packing=False,
 )
 
 print("Starting the sft run")
