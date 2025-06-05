@@ -106,32 +106,3 @@ def load_jsonl(filepath: str) -> List[Dict[str, Any]]:
                 data.append(json.loads(line))
     
     return data
-
-
-def sample_data(n: int = 3):
-    """Sample n random rows from generated dataset"""
-    try:
-        data = load_jsonl("data/indic_guard_10k.jsonl")
-        samples = random.sample(data, min(n, len(data)))
-        
-        for i, sample in enumerate(samples, 1):
-            print(f"\n--- Sample {i} ---")
-            print(f"USER: {sample['messages'][0]['content']}")
-            print(f"ASSISTANT: {sample['messages'][1]['content']}")
-            
-    except FileNotFoundError:
-        print("Dataset not found. Run 'python -m sft_data.generate' first.")
-    except Exception as e:
-        print(f"Error sampling data: {e}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Sample Indic-Guard dataset")
-    parser.add_argument("--n", type=int, default=3, help="Number of samples to show")
-    
-    args = parser.parse_args()
-    sample_data(args.n)
-
-
-if __name__ == "__main__":
-    main()
