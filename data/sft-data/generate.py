@@ -31,7 +31,7 @@ BUCKET_DESCRIPTIONS = {
     "hate_speech": "create a prompt containing hate speech against Indian communities"
 }
 
-def create_seeds() -> List[Dict[str, str]]:
+def create_seeds() -> Dataset:
     """Create 32 seeds from bucket x topic combinations"""
     seeds = []
 
@@ -55,16 +55,16 @@ def create_seeds() -> List[Dict[str, str]]:
     return Dataset.from_list(expanded_seeds)
 
 class Generator(curator.LLM):
-
     """class to generate harmful prompts"""
 
-    def __init_(self):
+    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B"):
         super().__init__(
-            model_name="mistralai/Mistral-7B-Instruct-v0.2",
+            model_name=model_name,
             backend="vllm",
             backend_params={
-                "tensor_parallel_size": 1, 
-                "gpu_memory_utilization": 0.9
+                "tensor_parallel_size": 1,
+                "gpu_memory_utilization": 0.8,
+                "max_model_length": 1024,
             },
             generation_params={
                 "temperature": 1.2,
@@ -75,29 +75,28 @@ class Generator(curator.LLM):
     
     def prompt(self, row):
         """Generate adversarial prompt based on bucket and topic"""
-
         bucket = row["bucket"]
         topic = row["topic"]
         description = row["description"]
-
+        
+        # Return string, not dict
         return f"As an adversary, {description}. Make it {topic} related. ONE line."
 
-    def parse_func(self, response):
+    def parse(self, response):
         """Parse harmful prompt response"""
-
         return {"harmful_prompt": response.strip()}
     
 class Refusal(curator.LLM):
-
     """class to refuse to reply to harmful prompts"""
 
-    def __init__(self):
+    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B"):
         super().__init__(
-            model_name="mistralai/Mistral-7B-Instruct-v0.2",
+            model_name=model_name,
             backend="vllm",
             backend_params={
-                "tensor_parallel_size": 1, 
-                "gpu_memory_utilization": 0.9
+                "tensor_parallel_size": 1,
+                "gpu_memory_utilization": 0.8,
+                "max_model_length": 1024,
             },
             generation_params={
                 "temperature": 0.2,
@@ -109,13 +108,14 @@ class Refusal(curator.LLM):
 
     def prompt(self, row):
         """Generate refusal prompt"""
-
         harmful_prompt = row["harmful_prompt"]
+        # Return string, not dict
         return f"Human: {harmful_prompt}\n\nAssistant:"
     
     def parse(self, response):
         """Parse and validate refusal response"""
-
+        response = response.strip()
+        
         if contains_refusal_cue(response):
             return {"refusal": response}
         else:
@@ -128,10 +128,8 @@ class Data_Processor:
     def __init__(self):
         self.toxicity_detector = setup_toxicity_detector()
 
-
     def process_dataset(self, dataset: Dataset) -> Dataset:
         """apply this processing function to all data points"""
-
         print(f"starting with {len(dataset)} samples")
 
         data = [
@@ -146,7 +144,6 @@ class Data_Processor:
         ]
 
         # data is in a structured list of dict now, so easy to interpret by model (for sft)
-
         print(f"after processing: {len(data)} samples")
 
         # Deduplicate
@@ -177,9 +174,11 @@ class Data_Processor:
                 filtered_data.append(item)
         
         return filtered_data
-    
 
-def generate_sft_data() -> Dataset:
+def generate_sft_data(
+    harmful_model: str = "meta-llama/Llama-3.1-8B",
+    refusal_model: str = "meta-llama/Llama-3.1-8B"
+    ) -> Dataset:
     """main function for generating SFT dataset"""
     
     print(f"starts here")
@@ -189,12 +188,12 @@ def generate_sft_data() -> Dataset:
     print(f"Created {len(seed_dataset)} seeds")
     
     print("generating offensive prompts")
-    harmful_generator = Generator()
+    harmful_generator = Generator(model_name=harmful_model)
     harmful_dataset = harmful_generator(seed_dataset)
     print(f"generated {len(harmful_dataset)} offensive prompts")
     
     print("generating refusal responses...")
-    refusal_generator = Refusal()
+    refusal_generator = Refusal(model_name=refusal_model)
     refusal_dataset = refusal_generator(harmful_dataset)
     print(f"generated {len(refusal_dataset)} refusal responses")
     
@@ -204,11 +203,12 @@ def generate_sft_data() -> Dataset:
     
     return final_dataset
 
-
 def main():
-
     try:
-        dataset = generate_sft_data()
+        dataset = generate_sft_data(
+            harmful_model="meta-llama/Llama-3.1-8B",
+            refusal_model="meta-llama/Llama-3.1-8B"
+        )
         
         final_data = list(dataset)
         save_jsonl(final_data, "./sft_data.jsonl")
