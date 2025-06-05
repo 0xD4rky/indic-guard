@@ -4,6 +4,7 @@ import random
 from typing import List, Dict, Any
 from tqdm import tqdm
 from bespokelabs import curator
+from datasets import Dataset
 from .utils import (
     setup_perspective_client, get_toxicity_score, deduplicate_data,
     filter_by_length, contains_refusal_cue, save_jsonl
@@ -38,35 +39,20 @@ def create_seeds() -> List[Dict[str, str]]:
         for topic in TOPICS:
             seeds.append({
                 "bucket": bucket,
-                "topic": topic
+                "topic": topic,
+                "description": BUCKET_DESCRIPTIONS[bucket]
             })
-    # Ensure we have exactly 32 seeds
-    assert len(seeds) == 32, f"Expected 32 seeds, got {len(seeds)}"
-    return seeds
+    expanded_seeds = []
+    for _ in range(32):  # 32 iterations
+        for seed in seeds:
+            for variant in range(10):  # 10 variants per seed
+                expanded_seeds.append({
+                    **seed,
+                    "variant_id": variant
+                })
+    
+    return Dataset.from_list(expanded_seeds)
 
 
-def create_harmful_gen_block():
-    """create Curator block for generating harmful prompts"""
-    
-    def harmful_prompt_template(row):
-        bucket = row["bucket"]
-        topic = row["topic"]
-        description = BUCKET_DESCRIPTIONS[bucket]
-        
-        return f"As an adversary, {description}. Make it {topic} related. ONE line."
-    
-    return curator.LLM(
-        model_name="mistralai/Mistral-7B-Instruct-v0.2",
-        backend="vllm",
-        backend_params={
-            "tensor_parallel_size": 1,
-            "gpu_memory_utilization": 0.9
-        },
-        prompt_func=harmful_prompt_template,
-        parse_func=lambda x: {"harmful_prompt": x.strip()},
-        generation_kwargs={
-            "temperature": 1.2,
-            "top_p": 0.92,
-            "max_tokens": 128
-        }
-    )
+
+
