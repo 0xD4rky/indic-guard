@@ -19,37 +19,25 @@ fi
 
 echo "Starting SFT run with model: $MODEL_ID"
 
-# updates sft.py with the new model id
-sed "s|\"model_id\" : \".*\"|\"model_id\" : \"$MODEL_ID\"|g" sft.py > sft_temp.py
-
-python3 sft_temp.py
+# Run SFT with model ID as argument
+python3 sft.py --model_id "$MODEL_ID"
 
 if [ $? -eq 0 ]; then
     echo "SFT run completed successfully!"
     
     echo "Starting adapter merging"
     
-    # Update merge_adapters.py with user parameters
-    sed -e "s|base_model_id=\".*\"|base_model_id=\"$MODEL_ID\"|g" \
-        -e "s|hub_username=\".*\"|hub_username=\"$HF_USERNAME\"|g" \
-        -e "s|push_to_hub=.*|push_to_hub=$PUSH_TO_HUB|g" \
-        merge_adapters.py > merge_temp.py
-    
-    # Run adapter merging
-    python3 merge_temp.py
+    # Run adapter merging with arguments
+    python3 merge_adapters.py --base_model_id "$MODEL_ID" --hub_username "$HF_USERNAME" --push_to_hub "$PUSH_TO_HUB"
     
     if [ $? -eq 0 ]; then
         echo "Adapter merging completed successfully"
-        # Clean up temporary files
-        rm sft_temp.py merge_temp.py
     else
         echo "Adapter merging failed!"
-        rm sft_temp.py merge_temp.py
         exit 1
     fi
     
 else
     echo "SFT Training failed!"
-    rm sft_temp.py
     exit 1
 fi

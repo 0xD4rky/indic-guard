@@ -2,6 +2,7 @@ import torch
 from transformers import AutoTokenizer, Gemma3ForCausalLM
 from peft import PeftModel, PeftConfig
 import os
+import argparse
 
 def merge_lora_adapters(
         base_model_id="google/gemma-3-1b-it",
@@ -48,12 +49,18 @@ def merge_lora_adapters(
     return merged_model, tokenizer, guarded_name
 
 if __name__ == "__main__":
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_model_id", type=str, default="google/gemma-3-1b-it")
+    parser.add_argument("--hub_username", type=str, default="Darkyy")
+    parser.add_argument("--push_to_hub", type=str, default="True")
+    args = parser.parse_args()
 
     merged_model, tokenizer, model_name = merge_lora_adapters(
-        base_model_id="google/gemma-3-1b-it",
+        base_model_id=args.base_model_id,
         peft_model_path="./results",
-        hub_username="Darkyy",
-        push_to_hub=True
+        hub_username=args.hub_username,
+        push_to_hub=args.push_to_hub.lower() == "true"
     )
 
 

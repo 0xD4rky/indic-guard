@@ -7,8 +7,15 @@ from utils import find_all_linear_names, print_trainable_parameters
 from datasets import load_dataset, Dataset
 
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model_id", type=str, default="google/gemma-3-1b-it")
+args = parser.parse_args()
+
+
 config = {
-    "model_id" : "google/gemma-3-1b-it",
+    "model_id" : args.model_id,
     "output_dir" : "./results",
     "max_seq_length": 512,
     "num_train_epochs": 3,
