@@ -1,0 +1,71 @@
+# taxonomy.yml
+#
+# defines the label hierarchy for Indic-Guard SFT data.
+# Each entry has:
+#   • id:     unique integer
+#   • name:   label key (must match keys used in data generation)
+#   • desc:   description of the label
+#   • parent: (optional) top‐level category name
+
+labels:
+  - id:   0
+    name: SAFE
+    desc: "Non‐offensive content or contextual condemnation of harmful content"
+
+  - id:   1
+    name: HATE_HARASSMENT
+    desc: "Any content promoting discrimination, bias, or hate toward Indian groups"
+
+  - id:   10
+    name: CASTEISM
+    parent: HATE_HARASSMENT
+    desc: "Promotes caste‐based discrimination or hierarchy in Indian society"
+
+  - id:   11
+    name: RELIGION
+    parent: HATE_HARASSMENT
+    desc: "Incites religious hatred or communal tensions in India"
+
+  - id:   12
+    name: REGION_LANGUAGE
+    parent: HATE_HARASSMENT
+    desc: "Demeans specific Indian regions or languages (e.g., North vs South)"
+
+  - id:   13
+    name: COLORISM
+    parent: HATE_HARASSMENT
+    desc: "Promotes skin color–based discrimination in Indian context"
+
+  - id:   14
+    name: STEREOTYPES
+    parent: HATE_HARASSMENT
+    desc: "Reinforces harmful stereotypes about Indian people"
+
+  - id:   15
+    name: CLASS
+    parent: HATE_HARASSMENT
+    desc: "Promotes economic class–based discrimination in India"
+
+  - id:   16
+    name: SUBTLE_BIAS
+    parent: HATE_HARASSMENT
+    desc: "Contains subtle bias against Indian customs, traditions, or communities"
+
+  - id:   17
+    name: REGIONAL_BIAS
+    parent: HATE_HARASSMENT
+    desc: "Unfair generalizations about specific Indian states or regions"
+
+  - id:   18
+    name: COUNTRY_BIAS
+    parent: HATE_HARASSMENT
+    desc: "Negative bias or disparaging remarks about India as a country"
+
+  - id:   19
+    name: HATE_SPEECH
+    parent: HATE_HARASSMENT
+    desc: "Overt hate speech targeting any Indian community, religion, or group"
+
+  - id:   20
+    name: MISINFORMATION
+    desc: "False or misleading claims about Indian communities or history"
