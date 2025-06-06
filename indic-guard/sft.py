@@ -67,16 +67,13 @@ def format_dataset(dataset):
     Format the dataset for SFT training using proper Gemma chat template
     """
     def format_example(example):
-        text = example["text_to_classify"]
-        label = example["label"]
-        
-        # Create instruction format
-        instruction = f"Classify the following text for potential hate speech, discrimination, or harmful content against Indian communities, languages, or culture.\n\nText: {text}\n\nClassification:"
+        offensive_prompt = example["offensive_prompt"]
+        refusal_message = example["refusal_message"]
         
         # Use proper Gemma chat template
         messages = [
-            {"role": "user", "content": instruction},
-            {"role": "assistant", "content": label}
+            {"role": "user", "content": offensive_prompt},
+            {"role": "assistant", "content": refusal_message}
         ]
         
         # Apply chat template
@@ -88,7 +85,6 @@ def format_dataset(dataset):
         
         return {"text": formatted_text}
     
-    # Map the function and explicitly remove original columns
     formatted_dataset = dataset.map(
         format_example, 
         remove_columns=dataset.column_names,
@@ -99,7 +95,7 @@ def format_dataset(dataset):
     return formatted_dataset
 
 
-dataset = load_dataset("Darkyy/Indic_Guard_SFT")["train"] 
+dataset = load_dataset("Darkyy/Indic_Guard_SFT_Data")["train"] 
 dataset = format_dataset(dataset)
 print(f"Loaded {len(dataset)} examples")
 
@@ -122,27 +118,27 @@ training_args = SFTConfig(
     logging_steps=config["logging_steps"],
     save_strategy="steps",
     save_steps=config["save_steps"],
-    evaluation_strategy="steps",
+    eval_strategy="steps",
     eval_steps=config["save_steps"],
     do_eval=True,
     learning_rate=config["learning_rate"],
     warmup_steps=config["warmup_steps"],
     lr_scheduler_type="linear",
-    run_name="SFT_Run",
-    report_to="wandb",  # Disable wandb/tensorboard for macOS compatibility
+    run_name="SFT_Run_1",
+    report_to="wandb",  
     remove_unused_columns=False,
-    push_to_hub=False,  # Disable for local training
+    push_to_hub=False,  #
     dataloader_pin_memory=False,  
-    fp16=False,  # Disable fp16 for macOS
-    bf16=False,  # Disable bf16 for MPS compatibility
+    fp16=False,  
+    bf16=False, 
     dataset_text_field="text",
     max_seq_length=config["max_seq_length"],
-    packing=True,  # Disable packing to avoid tokenization issues
+    packing=True,  
 )
 
 trainer = SFTTrainer(
     model=base_model,
-    tokenizer=tokenizer,
+    processing_class=tokenizer,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     args=training_args,
