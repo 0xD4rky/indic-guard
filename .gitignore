@@ -172,3 +172,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+wandb/
+results/
+
+data/sft-data/sft_data.jsonl
