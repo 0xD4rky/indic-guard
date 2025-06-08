@@ -1,5 +1,6 @@
 wandb
 vllm>=0.7.2
+transformers
 bespokelabs-curator==0.1.22
 torch>=2.2
 datasets
@@ -8,3 +9,8 @@ detoxify>=0.5.2
 transformers>=4.36.0
 tqdm
 jsonlines
+bitsandbytes
+peft
+accelerate
+trl
+datasets
