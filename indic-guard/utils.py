@@ -2,7 +2,7 @@ import torch
 import bitsandbytes as bnb
 
 def find_all_linear_names(model):
-    cls = torch.nn.Linear
+    cls = bnb.nn.Linear4bit
     lora_module_names = set()
     for name, module in model.named_modules():
         if isinstance(module, cls):
